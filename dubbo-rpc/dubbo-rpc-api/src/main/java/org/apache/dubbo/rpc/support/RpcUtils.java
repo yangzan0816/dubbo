@@ -34,6 +34,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.apache.dubbo.common.constants.CommonConstants.$INVOKE;
 import static org.apache.dubbo.common.constants.CommonConstants.$INVOKE_ASYNC;
+import static org.apache.dubbo.common.constants.CommonConstants.DOT_SEPARATOR;
 import static org.apache.dubbo.common.constants.CommonConstants.GENERIC_PARAMETER_DESC;
 import static org.apache.dubbo.common.constants.CommonConstants.TIMEOUT_ATTACHMENT_KEY;
 import static org.apache.dubbo.common.constants.CommonConstants.TIMEOUT_KEY;
@@ -43,6 +44,8 @@ import static org.apache.dubbo.rpc.Constants.ASYNC_KEY;
 import static org.apache.dubbo.rpc.Constants.AUTO_ATTACH_INVOCATIONID_KEY;
 import static org.apache.dubbo.rpc.Constants.ID_KEY;
 import static org.apache.dubbo.rpc.Constants.RETURN_KEY;
+import static org.apache.dubbo.rpc.Constants.GENERIC_KEY;
+
 /**
  * RpcUtils
  */
@@ -60,7 +63,7 @@ public class RpcUtils {
                 String service = invocation.getInvoker().getUrl().getServiceInterface();
                 if (StringUtils.isNotEmpty(service)) {
                     Method method = getMethodByService(invocation, service);
-                    return method.getReturnType();
+                    return method == null ? null : method.getReturnType();
                 }
             }
         } catch (Throwable t) {
@@ -75,10 +78,20 @@ public class RpcUtils {
                     && invocation.getInvoker().getUrl() != null
                     && invocation.getInvoker().getInterface() != GenericService.class
                     && !invocation.getMethodName().startsWith("$")) {
-                String service = invocation.getInvoker().getUrl().getServiceInterface();
-                if (StringUtils.isNotEmpty(service)) {
-                    Method method = getMethodByService(invocation, service);
-                    return ReflectUtils.getReturnTypes(method);
+                /**
+                 * if is generic, must use readObject()
+                 * the serialization like hession2, avro when use readObject(class), when the class is Template like class A<T>
+                 *  it use the A class to create and T is jsonobject, so it muse be error
+                 *  so it can depend to the data describe or GenericImplFilter to PojoUtils.realize it use Type
+                 *  of course we can change the serialization to use Type to create, but this work is to large....
+                 */
+                String generic = invocation.getInvoker().getUrl().getParameter(GENERIC_KEY);
+                if(!ProtocolUtils.isGeneric(generic)){
+                    String service = invocation.getInvoker().getUrl().getServiceInterface();
+                    if (StringUtils.isNotEmpty(service)) {
+                        Method method = getMethodByService(invocation, service);
+                        return ReflectUtils.getReturnTypes(method);
+                    }
                 }
             }
         } catch (Throwable t) {
@@ -100,7 +113,7 @@ public class RpcUtils {
      */
     public static void attachInvocationIdIfAsync(URL url, Invocation inv) {
         if (isAttachInvocationId(url, inv) && getInvocationId(inv) == null && inv instanceof RpcInvocation) {
-            ((RpcInvocation) inv).setAttachment(ID_KEY, String.valueOf(INVOKE_ID.getAndIncrement()));
+            inv.setAttachment(ID_KEY, String.valueOf(INVOKE_ID.getAndIncrement()));
         }
     }
 
@@ -156,10 +169,23 @@ public class RpcUtils {
 
     public static boolean isAsync(URL url, Invocation inv) {
         boolean isAsync;
-        if (Boolean.TRUE.toString().equals(inv.getAttachment(ASYNC_KEY))) {
-            isAsync = true;
+
+        if (inv instanceof RpcInvocation) {
+            RpcInvocation rpcInvocation = (RpcInvocation) inv;
+            if (rpcInvocation.getInvokeMode() != null) {
+                return rpcInvocation.getInvokeMode() == InvokeMode.ASYNC;
+            }
+        }
+
+        String config;
+        if ((config = inv.getAttachment(getMethodName(inv) + DOT_SEPARATOR + ASYNC_KEY)) != null) {
+            isAsync = Boolean.valueOf(config);
+        } else if ((config = inv.getAttachment(ASYNC_KEY)) != null) {
+            isAsync = Boolean.valueOf(config);
+        } else if ((config = url.getMethodParameter(getMethodName(inv), ASYNC_KEY)) != null) {
+            isAsync = Boolean.valueOf(config);
         } else {
-            isAsync = url.getMethodParameter(getMethodName(inv), ASYNC_KEY, false);
+            isAsync = url.getParameter(ASYNC_KEY, false);
         }
         return isAsync;
     }
@@ -189,6 +215,13 @@ public class RpcUtils {
     }
 
     public static InvokeMode getInvokeMode(URL url, Invocation inv) {
+        if (inv instanceof RpcInvocation) {
+            RpcInvocation rpcInvocation = (RpcInvocation) inv;
+            if (rpcInvocation.getInvokeMode() != null) {
+                return rpcInvocation.getInvokeMode();
+            }
+        }
+
         if (isReturnTypeFuture(inv)) {
             return InvokeMode.FUTURE;
         } else if (isAsync(url, inv)) {
@@ -200,8 +233,11 @@ public class RpcUtils {
 
     public static boolean isOneway(URL url, Invocation inv) {
         boolean isOneway;
-        if (Boolean.FALSE.toString().equals(inv.getAttachment(RETURN_KEY))) {
-            isOneway = true;
+        String config;
+        if ((config = inv.getAttachment(getMethodName(inv) + DOT_SEPARATOR + RETURN_KEY)) != null) {
+            isOneway = !Boolean.valueOf(config);
+        } else if ((config = inv.getAttachment(RETURN_KEY)) != null) {
+            isOneway = !Boolean.valueOf(config);
         } else {
             isOneway = !url.getMethodParameter(getMethodName(inv), RETURN_KEY, true);
         }
